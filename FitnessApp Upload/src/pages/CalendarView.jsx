@@ -1,10 +1,13 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSettings } from '../context/SettingsContext';
+import { useAuth } from '../context/AuthContext';
 import ProgramPlanner from '../components/ProgramPlanner';
+import * as firestoreService from '../services/firestoreService';
 
 const CalendarView = () => {
     const { unit } = useSettings();
+    const { user } = useAuth();
     const navigate = useNavigate();
     const [currentDate, setCurrentDate] = useState(new Date());
     const [selectedDate, setSelectedDate] = useState(new Date());
@@ -14,6 +17,8 @@ const CalendarView = () => {
     const [recoveryHistory, setRecoveryHistory] = useState([]);
     const [weightHistory, setWeightHistory] = useState([]);
     const [plannedWorkouts, setPlannedWorkouts] = useState([]);
+    const [notesHistory, setNotesHistory] = useState([]);
+    const [loading, setLoading] = useState(true);
 
     // UI State
     const [isPlanning, setIsPlanning] = useState(false);
@@ -21,63 +26,125 @@ const CalendarView = () => {
 
     // Input State for Weight
     const [weightInput, setWeightInput] = useState('');
+    const [noteInput, setNoteInput] = useState('');
 
     // Load Data
     useEffect(() => {
-        const savedWorkouts = localStorage.getItem('fitnessAppWorkouts');
-        if (savedWorkouts) setWorkouts(JSON.parse(savedWorkouts));
+        const loadData = async () => {
+            if (!user) return;
+            setLoading(true);
+            try {
+                // Parallel fetching for efficiency
+                const [
+                    fetchedWorkouts,
+                    fetchedRecovery,
+                    fetchedWeights,
+                    fetchedPlanned,
+                    fetchedNotes
+                ] = await Promise.all([
+                    firestoreService.getWorkouts(user.id),
+                    firestoreService.getRecovery(user.id),
+                    firestoreService.getBodyWeight(user.id),
+                    firestoreService.getPlannedWorkouts(user.id),
+                    firestoreService.getCalendarNotes(user.id)
+                ]);
 
-        const savedRecovery = localStorage.getItem('recoveryHistory');
-        if (savedRecovery) setRecoveryHistory(JSON.parse(savedRecovery));
+                setWorkouts(fetchedWorkouts);
+                setRecoveryHistory(fetchedRecovery);
+                setWeightHistory(fetchedWeights);
+                setPlannedWorkouts(fetchedPlanned);
+                setNotesHistory(fetchedNotes);
+            } catch (error) {
+                console.error('Error loading calendar data:', error);
+            } finally {
+                setLoading(false);
+            }
+        };
 
-        const savedWeights = localStorage.getItem('fitnessAppBodyWeight');
-        if (savedWeights) setWeightHistory(JSON.parse(savedWeights));
+        loadData();
+    }, [user]);
 
-        const savedPlanned = localStorage.getItem('fitnessAppPlannedWorkouts');
-        if (savedPlanned) setPlannedWorkouts(JSON.parse(savedPlanned));
-    }, []);
-
-    // Sync Weight Input when selected date changes
+    // Sync Weight and Note Input when selected date changes
     useEffect(() => {
         const dateStr = selectedDate.toISOString().split('T')[0];
-        const entry = weightHistory.find(w => w.date === dateStr);
-        setWeightInput(entry ? entry.weight : '');
-    }, [selectedDate, weightHistory]);
 
-    const saveWeight = (e) => {
+        const weightEntry = weightHistory.find(w => w.date === dateStr);
+        setWeightInput(weightEntry ? weightEntry.weight : '');
+
+        const noteEntry = notesHistory.find(n => n.date === dateStr);
+        setNoteInput(noteEntry ? noteEntry.text : '');
+    }, [selectedDate, weightHistory, notesHistory]);
+
+    const saveWeight = async (e) => {
         e.preventDefault();
+        if (!user) return;
         const dateStr = selectedDate.toISOString().split('T')[0];
-        const newEntry = { date: dateStr, weight: weightInput };
+        const newEntry = { date: dateStr, weight: parseFloat(weightInput) };
 
-        // Upsert
-        const newHistory = weightHistory.filter(w => w.date !== dateStr);
-        if (weightInput) {
-            newHistory.push(newEntry);
+        try {
+            const existingEntry = weightHistory.find(w => w.date === dateStr);
+            if (existingEntry) {
+                await firestoreService.updateBodyWeight(user.id, existingEntry.id, newEntry);
+                setWeightHistory(weightHistory.map(w => w.id === existingEntry.id ? { ...newEntry, id: existingEntry.id } : w));
+            } else if (weightInput) {
+                const newId = await firestoreService.addBodyWeight(user.id, newEntry);
+                setWeightHistory([...weightHistory, { ...newEntry, id: newId }]);
+            }
+        } catch (error) {
+            console.error('Error saving weight:', error);
         }
-
-        setWeightHistory(newHistory);
-        localStorage.setItem('fitnessAppBodyWeight', JSON.stringify(newHistory));
     };
 
-    const savePlannedWorkout = (program) => {
-        let updatedPlanned;
-        if (editingProgram) {
-            updatedPlanned = plannedWorkouts.map(p => p.id === program.id ? program : p);
-        } else {
-            updatedPlanned = [...plannedWorkouts, program];
-        }
+    const saveNote = async (e) => {
+        e.preventDefault();
+        if (!user) return;
+        const dateStr = selectedDate.toISOString().split('T')[0];
 
-        setPlannedWorkouts(updatedPlanned);
-        localStorage.setItem('fitnessAppPlannedWorkouts', JSON.stringify(updatedPlanned));
-        setIsPlanning(false);
-        setEditingProgram(null);
+        try {
+            const existingEntry = notesHistory.find(n => n.date === dateStr);
+            if (existingEntry) {
+                if (noteInput.trim()) {
+                    await firestoreService.updateCalendarNote(user.id, existingEntry.id, { text: noteInput });
+                    setNotesHistory(notesHistory.map(n => n.id === existingEntry.id ? { ...n, text: noteInput } : n));
+                } else {
+                    // Delete if empty
+                    await firestoreService.deleteCalendarNote(user.id, existingEntry.id);
+                    setNotesHistory(notesHistory.filter(n => n.id !== existingEntry.id));
+                }
+            } else if (noteInput.trim()) {
+                const newNote = { date: dateStr, text: noteInput };
+                const newId = await firestoreService.addCalendarNote(user.id, newNote);
+                setNotesHistory([...notesHistory, { ...newNote, id: newId }]);
+            }
+        } catch (error) {
+            console.error('Error saving note:', error);
+        }
     };
 
-    const deletePlannedWorkout = (id) => {
-        if (confirm('Are you sure you want to delete this planned workout?')) {
-            const updated = plannedWorkouts.filter(p => p.id !== id);
-            setPlannedWorkouts(updated);
-            localStorage.setItem('fitnessAppPlannedWorkouts', JSON.stringify(updated));
+    const savePlannedWorkout = async (program) => {
+        if (!user) return;
+        try {
+            if (editingProgram) {
+                await firestoreService.updatePlannedWorkout(user.id, program.id, program);
+                setPlannedWorkouts(plannedWorkouts.map(p => p.id === program.id ? program : p));
+            } else {
+                const newId = await firestoreService.addPlannedWorkout(user.id, program);
+                setPlannedWorkouts([...plannedWorkouts, { ...program, id: newId }]);
+            }
+            setIsPlanning(false);
+            setEditingProgram(null);
+        } catch (error) {
+            console.error('Error saving planned workout:', error);
+        }
+    };
+
+    const deletePlannedWorkout = async (id) => {
+        if (!user || !confirm('Are you sure you want to delete this planned workout?')) return;
+        try {
+            await firestoreService.deletePlannedWorkout(user.id, id);
+            setPlannedWorkouts(plannedWorkouts.filter(p => p.id !== id));
+        } catch (error) {
+            console.error('Error deleting planned workout:', error);
         }
     };
 
@@ -128,6 +195,7 @@ const CalendarView = () => {
             const hasPlanned = plannedWorkouts.some(p => p.date === dateStr);
             const recoveryEntry = recoveryHistory.find(r => r.date === dateStr);
             const hasWeight = weightHistory.some(w => w.date === dateStr);
+            const hasNote = notesHistory.some(n => n.date === dateStr);
 
             const isSelected = isSameDay(date, selectedDate);
             const isToday = isSameDay(date, new Date());
@@ -157,6 +225,7 @@ const CalendarView = () => {
                             }} title={`Recovery: ${recoveryEntry.score}`}></div>
                         )}
                         {hasWeight && <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#9c27b0' }} title="Weight Logged"></div>}
+                        {hasNote && <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#ffeb3b' }} title="Note Added"></div>}
                     </div>
                 </div>
             );
@@ -169,6 +238,10 @@ const CalendarView = () => {
     const dayWorkouts = workouts.filter(w => w.date.startsWith(selectedDateStr));
     const dayPlanned = plannedWorkouts.filter(p => p.date === selectedDateStr);
     const dayRecovery = recoveryHistory.find(r => r.date === selectedDateStr);
+
+    if (loading) {
+        return <div>Loading calendar...</div>;
+    }
 
     if (isPlanning) {
         return (
@@ -224,6 +297,9 @@ const CalendarView = () => {
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                             <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#9c27b0' }}></div> Body Weight
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ffeb3b' }}></div> Note
                         </div>
                     </div>
                 </div>
@@ -317,7 +393,22 @@ const CalendarView = () => {
                             </form>
                         </div>
 
-                        {/* 4. Recovery Score */}
+                        {/* 4. Daily Notes */}
+                        <div>
+                            <h3>📝 Daily Notes</h3>
+                            <form onSubmit={saveNote} style={{ display: 'flex', gap: '0.5rem' }}>
+                                <input
+                                    type="text"
+                                    placeholder="Add a note for this day..."
+                                    value={noteInput}
+                                    onChange={(e) => setNoteInput(e.target.value)}
+                                    style={{ flex: 1 }}
+                                />
+                                <button type="submit" className="btn">Save</button>
+                            </form>
+                        </div>
+
+                        {/* 5. Recovery Score */}
                         <div>
                             <h3>🔋 Recovery</h3>
                             {dayRecovery ? (

@@ -3,10 +3,13 @@ import { exercises as defaultExercises, EXERCISE_CATEGORIES, EXERCISE_CONFIG } f
 import { calculateEstimated1RM } from '../utils/calculator';
 import { Link, useLocation } from 'react-router-dom';
 import { useSettings } from '../context/SettingsContext';
+import { useAuth } from '../context/AuthContext';
 import ExerciseTools from '../components/ExerciseTools';
+import * as firestoreService from '../services/firestoreService';
 
 const WorkoutLog = () => {
     const { unit } = useSettings();
+    const { user } = useAuth();
     const location = useLocation();
 
     // Planned Program State
@@ -23,7 +26,6 @@ const WorkoutLog = () => {
     const [workoutType, setWorkoutType] = useState('strength'); // 'strength' or 'cardio'
 
     // Multi-Set State (Strength)
-    // Structure: [{ id: 1, weight: '', reps: '', targetRpe: '', actualRpe: '' }]
     const [setRows, setSetRows] = useState([{ id: Date.now(), weight: '', reps: '', targetRpe: '', actualRpe: '' }]);
 
     // Modifiers State
@@ -40,7 +42,8 @@ const WorkoutLog = () => {
         isSlingshot: false,
         board: '',
         isDeadliftSuit: false,
-        isDeadliftSuitStrapsUp: false
+        isDeadliftSuitStrapsUp: false,
+        isFeetUp: false
     });
 
     // Cardio State
@@ -48,32 +51,48 @@ const WorkoutLog = () => {
     const [distance, setDistance] = useState(''); // km/miles
     const [notes, setNotes] = useState('');
 
-    const [loggedSets, setLoggedSets] = useState(() => {
-        const saved = localStorage.getItem('fitnessAppWorkouts');
-        return saved ? JSON.parse(saved) : [];
-    });
-
+    const [loggedSets, setLoggedSets] = useState([]);
     const [maxes, setMaxes] = useState({});
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
 
-    // Load Data
+    // Load Data from Firestore
     useEffect(() => {
-        const savedMaxes = localStorage.getItem('fitnessAppMaxes');
-        if (savedMaxes) setMaxes(JSON.parse(savedMaxes));
+        const loadData = async () => {
+            if (!user) return;
 
-        const savedCustom = localStorage.getItem('fitnessAppCustomExercises');
-        if (savedCustom) {
-            const parsed = JSON.parse(savedCustom);
-            setCustomExercises(parsed);
-            setAllExercises([...defaultExercises, ...parsed]);
-        }
-    }, []);
+            setLoading(true);
+            try {
+                // Fetch only today's workouts instead of everything
+                const today = new Date().toISOString().split('T')[0];
+                const workouts = await firestoreService.getWorkouts(user.id, 20); // Get last 20 as fallback/recent
+                const todayWorkouts = workouts.filter(w => w.date.startsWith(today));
+                setLoggedSets(todayWorkouts);
+
+                // Load profile/maxes
+                const profile = await firestoreService.getUserProfile(user.id);
+                if (profile?.maxes) setMaxes(profile.maxes);
+
+                // Load custom exercises
+                const custom = await firestoreService.getCustomExercises(user.id);
+                setCustomExercises(custom);
+                setAllExercises([...defaultExercises, ...custom]);
+            } catch (error) {
+                console.error('Error loading workout data:', error);
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        loadData();
+    }, [user]);
 
     // Load Planned Workout if coming from Calendar
     useEffect(() => {
         if (plannedProgram && plannedProgram.exercises.length > currentExIndex) {
             const ex = plannedProgram.exercises[currentExIndex];
             setSelectedExerciseId(ex.exerciseId);
-            setWorkoutType('strength'); // Planning currently only supports strength for details
+            setWorkoutType('strength');
             setSetRows(ex.sets.map(s => ({
                 id: Date.now() + Math.random(),
                 weight: s.weight,
@@ -85,24 +104,12 @@ const WorkoutLog = () => {
         }
     }, [plannedProgram, currentExIndex]);
 
-    // Save Workouts
-    useEffect(() => {
-        localStorage.setItem('fitnessAppWorkouts', JSON.stringify(loggedSets));
-    }, [loggedSets]);
-
-    // Save Custom Exercises
-    useEffect(() => {
-        if (customExercises.length > 0) {
-            localStorage.setItem('fitnessAppCustomExercises', JSON.stringify(customExercises));
-        }
-    }, [customExercises]);
-
     // --- Helpers for Set Rows ---
     const handleAddRow = () => {
         const lastRow = setRows[setRows.length - 1];
         setSetRows([...setRows, {
             id: Date.now(),
-            weight: lastRow.weight, // Clone previous for convenience
+            weight: lastRow.weight,
             reps: lastRow.reps,
             targetRpe: lastRow.targetRpe,
             actualRpe: ''
@@ -119,33 +126,39 @@ const WorkoutLog = () => {
         setSetRows(setRows.map(row => row.id === id ? { ...row, [field]: value } : row));
     };
 
-    // ----------------------------
-
-    const handleCreateExercise = (e) => {
+    const handleCreateExercise = async (e) => {
         e.preventDefault();
-        if (!newExerciseName.trim()) return;
+        if (!newExerciseName.trim() || !user) return;
 
         const newEx = {
-            id: `custom_${Date.now()}`,
             name: newExerciseName,
             category: EXERCISE_CATEGORIES.CUSTOM
         };
 
-        const updatedCustom = [...customExercises, newEx];
-        setCustomExercises(updatedCustom);
-        setAllExercises([...defaultExercises, ...updatedCustom]);
+        try {
+            await firestoreService.addCustomExercise(user.id, newEx);
 
-        // Auto-select
-        setSelectedExerciseId(newEx.id);
-        setWorkoutType('strength');
-        setNewExerciseName('');
-        setIsCreatingExercise(false);
+            // Reload custom exercises
+            const custom = await firestoreService.getCustomExercises(user.id);
+            setCustomExercises(custom);
+            setAllExercises([...defaultExercises, ...custom]);
+
+            // Auto-select the last added exercise
+            if (custom.length > 0) {
+                setSelectedExerciseId(custom[custom.length - 1].id);
+            }
+            setWorkoutType('strength');
+            setNewExerciseName('');
+            setIsCreatingExercise(false);
+        } catch (error) {
+            console.error('Error creating exercise:', error);
+        }
     };
 
-    const handleAddSet = (e) => {
+    const handleAddSet = async (e) => {
         e.preventDefault();
 
-        if (!selectedExerciseId) return;
+        if (!selectedExerciseId || !user) return;
         const exercise = allExercises.find(ex => ex.id === selectedExerciseId);
 
         let newEntries = [];
@@ -155,26 +168,24 @@ const WorkoutLog = () => {
             newEntries = setRows.map(row => {
                 let estimatedMax = calculateEstimated1RM(row.weight, row.reps, row.actualRpe || row.targetRpe);
                 return {
-                    id: row.id, // Use row ID as unique ID
                     date: new Date().toISOString(),
                     exerciseId: exercise.id,
                     exerciseName: exercise.name,
                     category: exercise.category,
                     type: workoutType,
                     weight: row.weight,
-                    sets: 1, // Each row is 1 set
+                    sets: 1,
                     reps: row.reps,
                     targetRpe: row.targetRpe,
                     actualRpe: row.actualRpe,
                     estimated1RM: estimatedMax,
                     modifiers: { ...modifiers },
-                    notes: notes // Apply common notes to all sets in this batch
+                    notes: notes
                 };
             });
         } else {
             // Cardio
             newEntries.push({
-                id: Date.now(),
                 date: new Date().toISOString(),
                 exerciseId: exercise.id,
                 exerciseName: exercise.name,
@@ -186,28 +197,51 @@ const WorkoutLog = () => {
             });
         }
 
-        setLoggedSets([...newEntries, ...loggedSets]);
+        // Save to Firestore
+        setSaving(true);
 
-        // If part of a planned program, move to next exercise or finish
-        if (plannedProgram) {
-            if (currentExIndex < plannedProgram.exercises.length - 1) {
-                setCurrentExIndex(currentExIndex + 1);
-            } else {
-                setPlannedProgram(null);
-                alert('Planned workout complete!');
+        // Optimistic Update: Add to local state immediately
+        const optimisticEntries = newEntries.map(e => ({ ...e, id: 'temp-' + Math.random() }));
+        setLoggedSets(prev => [...optimisticEntries, ...prev]);
+
+        try {
+            const savePromises = newEntries.map(async (entry) => {
+                return await firestoreService.addWorkout(user.id, entry);
+            });
+
+            const realIds = await Promise.all(savePromises);
+
+            // Update with real IDs
+            setLoggedSets(prev => prev.map((item, i) => {
+                const optIdx = optimisticEntries.findIndex(oe => oe.id === item.id);
+                if (optIdx >= 0) return { ...item, id: realIds[optIdx] };
+                return item;
+            }));
+
+            if (plannedProgram) {
+                if (currentExIndex < plannedProgram.exercises.length - 1) {
+                    setCurrentExIndex(currentExIndex + 1);
+                } else {
+                    setPlannedProgram(null);
+                    alert('Planned workout complete!');
+                }
             }
-        }
 
-        // Reset fields
-        if (workoutType === 'strength') {
-            // Reset to one empty row, maybe keeping weight?
-            const lastRow = setRows[setRows.length - 1];
-            setSetRows([{ id: Date.now(), weight: lastRow.weight, reps: lastRow.reps, targetRpe: '', actualRpe: '' }]);
-            setNotes('');
-        } else {
-            setDuration('');
-            setDistance('');
-            setNotes('');
+            if (workoutType === 'strength') {
+                const lastRow = setRows[setRows.length - 1];
+                setSetRows([{ id: Date.now(), weight: lastRow.weight, reps: lastRow.reps, targetRpe: '', actualRpe: '' }]);
+                setNotes('');
+            } else {
+                setDuration('');
+                setDistance('');
+                setNotes('');
+            }
+        } catch (error) {
+            console.error('Error logging workout:', error);
+            setLoggedSets(prev => prev.filter(item => !item.id.toString().startsWith('temp-')));
+            alert('Failed to log workout. Please try again.');
+        } finally {
+            setSaving(false);
         }
     };
 
@@ -243,7 +277,8 @@ const WorkoutLog = () => {
             isSlingshot: false,
             board: '',
             isDeadliftSuit: false,
-            isDeadliftSuitStrapsUp: false
+            isDeadliftSuitStrapsUp: false,
+            isFeetUp: false
         });
         setSetRows([{ id: Date.now(), weight: '', reps: '', targetRpe: '', actualRpe: '' }]);
     };
@@ -251,6 +286,7 @@ const WorkoutLog = () => {
     const clearHistory = () => {
         if (confirm('Are you sure you want to clear your history?')) {
             setLoggedSets([]);
+            // Note: This only clears local state. To delete from Firestore, we'd need to implement that
         }
     };
 
@@ -269,6 +305,10 @@ const WorkoutLog = () => {
     };
 
     const activeConfig = EXERCISE_CONFIG[selectedExerciseId] || {};
+
+    if (loading) {
+        return <div className="card">Loading...</div>;
+    }
 
     return (
         <div style={{ maxWidth: '800px', margin: '0 auto', textAlign: 'left' }}>
@@ -344,110 +384,129 @@ const WorkoutLog = () => {
                             {workoutType === 'strength' ? (
                                 <>
                                     {/* --- Modifiers Section --- */}
-                                    {activeConfig.hasBarValues && (
-                                        <div className="input-group">
-                                            <label>Bar Type</label>
-                                            <select value={modifiers.bar} onChange={e => setModifiers({ ...modifiers, bar: e.target.value })} style={{ padding: '0.5rem' }}>
-                                                <option value="">Standard</option>
-                                                {activeConfig.hasBarValues.map(v => <option key={v} value={v}>{v}</option>)}
-                                            </select>
-                                        </div>
-                                    )}
-                                    {activeConfig.hasGripValues && (
-                                        <div className="input-group">
-                                            <label>Grip</label>
-                                            <select value={modifiers.grip} onChange={e => setModifiers({ ...modifiers, grip: e.target.value })} style={{ padding: '0.5rem' }}>
-                                                <option value="">Standard</option>
-                                                {activeConfig.hasGripValues.map(v => <option key={v} value={v}>{v}</option>)}
-                                            </select>
-                                        </div>
-                                    )}
-                                    {activeConfig.hasPause && (
-                                        <div className="input-group">
-                                            <label>Pause</label>
-                                            <select value={modifiers.pause} onChange={e => setModifiers({ ...modifiers, pause: e.target.value })} style={{ padding: '0.5rem' }}>
-                                                <option value="">None</option>
-                                                <option value="2s">2 sec</option>
-                                                <option value="3s">3 sec</option>
-                                                <option value="4s">4 sec</option>
-                                            </select>
-                                        </div>
-                                    )}
-                                    {activeConfig.hasTempo && (
-                                        <div className="input-group">
-                                            <label>Tempo (e.g. 3-0-0)</label>
-                                            <input type="text" value={modifiers.tempo} onChange={e => setModifiers({ ...modifiers, tempo: e.target.value })} placeholder="3-0-0" />
-                                        </div>
-                                    )}
-                                    {activeConfig.hasBelt && (
-                                        <div className="input-group" style={{ display: 'flex', alignItems: 'center', height: '100%' }}>
-                                            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0 }}>
-                                                <input type="checkbox" checked={modifiers.isBelt} onChange={e => setModifiers({ ...modifiers, isBelt: e.target.checked })} style={{ width: '20px', height: '20px' }} />
-                                                Belt
-                                            </label>
-                                        </div>
-                                    )}
-                                    {activeConfig.hasKneeWraps && (
-                                        <div className="input-group" style={{ display: 'flex', alignItems: 'center', height: '100%' }}>
-                                            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0 }}>
-                                                <input type="checkbox" checked={modifiers.isKneeWraps} onChange={e => setModifiers({ ...modifiers, isKneeWraps: e.target.checked })} style={{ width: '20px', height: '20px' }} />
-                                                Knee Wraps
-                                            </label>
-                                        </div>
-                                    )}
-                                    {activeConfig.hasSquatSuit && (
-                                        <div className="input-group" style={{ gridColumn: '1 / -1', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-                                            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0 }}>
-                                                <input type="checkbox" checked={modifiers.isSquatSuit} onChange={e => setModifiers({ ...modifiers, isSquatSuit: e.target.checked })} style={{ width: '20px', height: '20px' }} />
-                                                Squat Suit
-                                            </label>
-                                            {modifiers.isSquatSuit && (
-                                                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0, marginLeft: '1rem' }}>
-                                                    <input type="checkbox" checked={modifiers.isSquatSuitStrapsUp} onChange={e => setModifiers({ ...modifiers, isSquatSuitStrapsUp: e.target.checked })} style={{ width: '20px', height: '20px' }} />
-                                                    Straps Up?
+                                    <div style={{
+                                        display: 'grid',
+                                        gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
+                                        gap: '0.5rem',
+                                        background: '#222',
+                                        padding: '1rem',
+                                        borderRadius: '8px',
+                                        marginBottom: '1rem',
+                                        gridColumn: '1 / -1'
+                                    }}>
+                                        {activeConfig.hasBarValues && (
+                                            <div className="input-group" style={{ marginBottom: 0 }}>
+                                                <label>Bar Type</label>
+                                                <select value={modifiers.bar} onChange={e => setModifiers({ ...modifiers, bar: e.target.value })} style={{ padding: '0.5rem' }}>
+                                                    <option value="">Standard</option>
+                                                    {activeConfig.hasBarValues.map(v => <option key={v} value={v}>{v}</option>)}
+                                                </select>
+                                            </div>
+                                        )}
+                                        {activeConfig.hasGripValues && (
+                                            <div className="input-group">
+                                                <label>Grip</label>
+                                                <select value={modifiers.grip} onChange={e => setModifiers({ ...modifiers, grip: e.target.value })} style={{ padding: '0.5rem' }}>
+                                                    <option value="">Standard</option>
+                                                    {activeConfig.hasGripValues.map(v => <option key={v} value={v}>{v}</option>)}
+                                                </select>
+                                            </div>
+                                        )}
+                                        {activeConfig.hasPause && (
+                                            <div className="input-group">
+                                                <label>Pause</label>
+                                                <select value={modifiers.pause} onChange={e => setModifiers({ ...modifiers, pause: e.target.value })} style={{ padding: '0.5rem' }}>
+                                                    <option value="">None</option>
+                                                    <option value="2s">2 sec</option>
+                                                    <option value="3s">3 sec</option>
+                                                    <option value="4s">4 sec</option>
+                                                </select>
+                                            </div>
+                                        )}
+                                        {activeConfig.hasTempo && (
+                                            <div className="input-group">
+                                                <label>Tempo (e.g. 3-0-0)</label>
+                                                <input type="text" value={modifiers.tempo} onChange={e => setModifiers({ ...modifiers, tempo: e.target.value })} placeholder="3-0-0" />
+                                            </div>
+                                        )}
+                                        {activeConfig.hasBelt && (
+                                            <div className="input-group" style={{ display: 'flex', alignItems: 'center', height: '100%' }}>
+                                                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0 }}>
+                                                    <input type="checkbox" checked={modifiers.isBelt} onChange={e => setModifiers({ ...modifiers, isBelt: e.target.checked })} style={{ width: '20px', height: '20px' }} />
+                                                    Belt
                                                 </label>
-                                            )}
-                                        </div>
-                                    )}
-                                    {activeConfig.hasBenchShirt && (
-                                        <div className="input-group" style={{ display: 'flex', alignItems: 'center', height: '100%' }}>
-                                            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0 }}>
-                                                <input type="checkbox" checked={modifiers.isBenchShirt} onChange={e => setModifiers({ ...modifiers, isBenchShirt: e.target.checked })} style={{ width: '20px', height: '20px' }} />
-                                                Bench Shirt
-                                            </label>
-                                        </div>
-                                    )}
-                                    {activeConfig.hasSlingshot && (
-                                        <div className="input-group" style={{ display: 'flex', alignItems: 'center', height: '100%' }}>
-                                            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0 }}>
-                                                <input type="checkbox" checked={modifiers.isSlingshot} onChange={e => setModifiers({ ...modifiers, isSlingshot: e.target.checked })} style={{ width: '20px', height: '20px' }} />
-                                                Slingshot
-                                            </label>
-                                        </div>
-                                    )}
-                                    {activeConfig.hasBoardValues && (
-                                        <div className="input-group">
-                                            <label>Boards</label>
-                                            <select value={modifiers.board} onChange={e => setModifiers({ ...modifiers, board: e.target.value })} style={{ padding: '0.5rem' }}>
-                                                <option value="">None</option>
-                                                {activeConfig.hasBoardValues.map(v => <option key={v} value={v}>{v}</option>)}
-                                            </select>
-                                        </div>
-                                    )}
-                                    {activeConfig.hasDeadliftSuit && (
-                                        <div className="input-group" style={{ gridColumn: '1 / -1', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-                                            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0 }}>
-                                                <input type="checkbox" checked={modifiers.isDeadliftSuit} onChange={e => setModifiers({ ...modifiers, isDeadliftSuit: e.target.checked })} style={{ width: '20px', height: '20px' }} />
-                                                Deadlift Suit
-                                            </label>
-                                            {modifiers.isDeadliftSuit && (
-                                                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0, marginLeft: '1rem' }}>
-                                                    <input type="checkbox" checked={modifiers.isDeadliftSuitStrapsUp} onChange={e => setModifiers({ ...modifiers, isDeadliftSuitStrapsUp: e.target.checked })} style={{ width: '20px', height: '20px' }} />
-                                                    Straps Up?
+                                            </div>
+                                        )}
+                                        {activeConfig.hasKneeWraps && (
+                                            <div className="input-group" style={{ display: 'flex', alignItems: 'center', height: '100%' }}>
+                                                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0 }}>
+                                                    <input type="checkbox" checked={modifiers.isKneeWraps} onChange={e => setModifiers({ ...modifiers, isKneeWraps: e.target.checked })} style={{ width: '20px', height: '20px' }} />
+                                                    Knee Wraps
                                                 </label>
-                                            )}
-                                        </div>
-                                    )}
+                                            </div>
+                                        )}
+                                        {activeConfig.hasSquatSuit && (
+                                            <div className="input-group" style={{ gridColumn: '1 / -1', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+                                                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0 }}>
+                                                    <input type="checkbox" checked={modifiers.isSquatSuit} onChange={e => setModifiers({ ...modifiers, isSquatSuit: e.target.checked })} style={{ width: '20px', height: '20px' }} />
+                                                    Squat Suit
+                                                </label>
+                                                {modifiers.isSquatSuit && (
+                                                    <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0, marginLeft: '1rem' }}>
+                                                        <input type="checkbox" checked={modifiers.isSquatSuitStrapsUp} onChange={e => setModifiers({ ...modifiers, isSquatSuitStrapsUp: e.target.checked })} style={{ width: '20px', height: '20px' }} />
+                                                        Straps Up?
+                                                    </label>
+                                                )}
+                                            </div>
+                                        )}
+                                        {activeConfig.hasBenchShirt && (
+                                            <div className="input-group" style={{ display: 'flex', alignItems: 'center', height: '100%' }}>
+                                                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0 }}>
+                                                    <input type="checkbox" checked={modifiers.isBenchShirt} onChange={e => setModifiers({ ...modifiers, isBenchShirt: e.target.checked })} style={{ width: '20px', height: '20px' }} />
+                                                    Bench Shirt
+                                                </label>
+                                            </div>
+                                        )}
+                                        {activeConfig.hasSlingshot && (
+                                            <div className="input-group" style={{ display: 'flex', alignItems: 'center', height: '100%' }}>
+                                                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0 }}>
+                                                    <input type="checkbox" checked={modifiers.isSlingshot} onChange={e => setModifiers({ ...modifiers, isSlingshot: e.target.checked })} style={{ width: '20px', height: '20px' }} />
+                                                    Slingshot
+                                                </label>
+                                            </div>
+                                        )}
+                                        {activeConfig.hasBoardValues && (
+                                            <div className="input-group">
+                                                <label>Board</label>
+                                                <select value={modifiers.board} onChange={e => setModifiers({ ...modifiers, board: e.target.value })} style={{ padding: '0.5rem' }}>
+                                                    <option value="">None</option>
+                                                    {activeConfig.hasBoardValues.map(v => <option key={v} value={v}>{v}</option>)}
+                                                </select>
+                                            </div>
+                                        )}
+                                        {activeConfig.hasFeetUp && (
+                                            <div className="input-group" style={{ display: 'flex', alignItems: 'center', height: '100%', marginBottom: 0 }}>
+                                                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0 }}>
+                                                    <input type="checkbox" checked={modifiers.isFeetUp} onChange={e => setModifiers({ ...modifiers, isFeetUp: e.target.checked })} style={{ width: '20px', height: '20px' }} />
+                                                    Feet Up
+                                                </label>
+                                            </div>
+                                        )}
+                                        {activeConfig.hasDeadliftSuit && (
+                                            <div className="input-group" style={{ gridColumn: '1 / -1', display: 'flex', gap: '1rem', flexWrap: 'wrap', marginBottom: 0 }}>
+                                                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0 }}>
+                                                    <input type="checkbox" checked={modifiers.isDeadliftSuit} onChange={e => setModifiers({ ...modifiers, isDeadliftSuit: e.target.checked })} style={{ width: '20px', height: '20px' }} />
+                                                    Deadlift Suit
+                                                </label>
+                                                {modifiers.isDeadliftSuit && (
+                                                    <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem', marginBottom: 0, marginLeft: '1rem' }}>
+                                                        <input type="checkbox" checked={modifiers.isDeadliftSuitStrapsUp} onChange={e => setModifiers({ ...modifiers, isDeadliftSuitStrapsUp: e.target.checked })} style={{ width: '20px', height: '20px' }} />
+                                                        Straps Up?
+                                                    </label>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
 
                                     {/* --- Multi-Set Row Interface --- */}
                                     <div style={{ gridColumn: '1 / -1', marginTop: '1rem' }}>
@@ -463,54 +522,66 @@ const WorkoutLog = () => {
                                                 <div></div>
                                             </div>
 
-                                            {setRows.map((row, index) => (
-                                                <div key={row.id} style={{ display: 'grid', gridTemplateColumns: '1fr 0.8fr 0.8fr 0.8fr 30px', gap: '0.5rem', alignItems: 'center' }}>
-                                                    <input
-                                                        type="number"
-                                                        value={row.weight}
-                                                        onChange={e => handleRowChange(row.id, 'weight', e.target.value)}
-                                                        placeholder="lbs"
-                                                        required
-                                                        style={{ width: '100%' }}
-                                                    />
-                                                    <input
-                                                        type="number"
-                                                        value={row.reps}
-                                                        onChange={e => handleRowChange(row.id, 'reps', e.target.value)}
-                                                        placeholder="5"
-                                                        required
-                                                        style={{ width: '100%' }}
-                                                    />
-                                                    <input
-                                                        type="number"
-                                                        step="0.5"
-                                                        value={row.targetRpe}
-                                                        onChange={e => handleRowChange(row.id, 'targetRpe', e.target.value)}
-                                                        placeholder="8"
-                                                        style={{ width: '100%' }}
-                                                    />
-                                                    <input
-                                                        type="number"
-                                                        step="0.5"
-                                                        value={row.actualRpe}
-                                                        onChange={e => handleRowChange(row.id, 'actualRpe', e.target.value)}
-                                                        placeholder="9"
-                                                        required
-                                                        style={{ width: '100%' }}
-                                                    />
-                                                    {index > 0 && (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => handleRemoveRow(row.id)}
-                                                            className="btn"
-                                                            style={{ padding: '0', color: '#f44336', background: 'transparent', width: '100%', textAlign: 'center' }}
-                                                            title="Remove set"
-                                                        >
-                                                            &times;
-                                                        </button>
-                                                    )}
-                                                </div>
-                                            ))}
+                                            {setRows.map((row, index) => {
+                                                const liveEst1RM = calculateEstimated1RM(row.weight, row.reps, row.actualRpe || row.targetRpe);
+                                                return (
+                                                    <div key={row.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(60px, 1fr) minmax(40px, 0.8fr) minmax(40px, 0.8fr) minmax(40px, 0.8fr) 30px', gap: '0.5rem', alignItems: 'center' }}>
+                                                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                                            <input
+                                                                type="number"
+                                                                value={row.weight}
+                                                                onChange={e => handleRowChange(row.id, 'weight', e.target.value)}
+                                                                placeholder=""
+                                                                required
+                                                                style={{ width: '100%' }}
+                                                            />
+                                                        </div>
+                                                        <input
+                                                            type="number"
+                                                            value={row.reps}
+                                                            onChange={e => handleRowChange(row.id, 'reps', e.target.value)}
+                                                            placeholder="5"
+                                                            required
+                                                            style={{ width: '100%' }}
+                                                        />
+                                                        <input
+                                                            type="number"
+                                                            step="0.5"
+                                                            value={row.targetRpe}
+                                                            onChange={e => handleRowChange(row.id, 'targetRpe', e.target.value)}
+                                                            placeholder="8"
+                                                            style={{ width: '100%' }}
+                                                        />
+                                                        <div style={{ position: 'relative' }}>
+                                                            <input
+                                                                type="number"
+                                                                step="0.5"
+                                                                value={row.actualRpe}
+                                                                onChange={e => handleRowChange(row.id, 'actualRpe', e.target.value)}
+                                                                placeholder="9"
+                                                                required
+                                                                style={{ width: '100%' }}
+                                                            />
+                                                            {liveEst1RM > 0 && (
+                                                                <div style={{ position: 'absolute', top: '100%', right: 0, fontSize: '0.7rem', color: 'gold', whiteSpace: 'nowrap', zIndex: 10, background: 'rgba(0,0,0,0.8)', padding: '2px 4px', borderRadius: '4px' }}>
+                                                                    e1RM: {liveEst1RM}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        {index > 0 && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleRemoveRow(row.id)}
+                                                                className="btn"
+                                                                style={{ padding: '0', color: '#f44336', background: 'transparent', width: '100%', textAlign: 'center' }}
+                                                                title="Remove set"
+                                                            >
+                                                                &times;
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
                                         </div>
 
                                         <button
@@ -542,8 +613,8 @@ const WorkoutLog = () => {
                             <input type="text" value={notes} onChange={e => setNotes(e.target.value)} placeholder="e.g. Felt heavy today..." />
                         </div>
 
-                        <button type="submit" className="btn btn-primary" style={{ marginTop: '1rem', width: '100%' }}>
-                            {workoutType === 'strength' && setRows.length > 1 ? `Log ${setRows.length} Sets` : 'Log Workout'}
+                        <button type="submit" className="btn btn-primary" style={{ marginTop: '1rem', width: '100%' }} disabled={saving}>
+                            {saving ? 'Logging...' : (workoutType === 'strength' && setRows.length > 1 ? `Log ${setRows.length} Sets` : 'Log Workout')}
                         </button>
                     </form>
                 )}
@@ -581,6 +652,7 @@ const WorkoutLog = () => {
                                         {entry.modifiers.board && <span style={{ background: '#333', padding: '1px 4px', borderRadius: '4px' }}>{entry.modifiers.board}</span>}
                                         {entry.modifiers.isDeadliftSuit && <span style={{ background: '#333', padding: '1px 4px', borderRadius: '4px' }}>DL Suit</span>}
                                         {entry.modifiers.isDeadliftSuitStrapsUp && <span style={{ background: '#333', padding: '1px 4px', borderRadius: '4px' }}>Straps Up</span>}
+                                        {entry.modifiers.isFeetUp && <span style={{ background: '#333', padding: '1px 4px', borderRadius: '4px' }}>Feet Up</span>}
                                     </div>
                                 )}
                                 <div style={{ fontSize: '0.9rem', color: '#ccc', marginTop: '0.2rem' }}>
@@ -615,8 +687,7 @@ const WorkoutLog = () => {
                             </div>
                         </div>
                     );
-                })}
-            </div>
+                })}</div>
         </div >
     );
 };

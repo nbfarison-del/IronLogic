@@ -4,6 +4,7 @@ export const EXERCISE_CATEGORIES = {
     CABLE: 'Cable',
     MACHINE: 'Machine',
     BODYWEIGHT: 'Bodyweight',
+    CORE: 'Core',
     CARDIO: 'Cardio',
     CUSTOM: 'Custom'
 };
@@ -27,7 +28,9 @@ export const exercises = [
     { id: 'db_lunge', name: 'Dumbbell Lunge', category: EXERCISE_CATEGORIES.DUMBBELL },
     { id: 'db_curl', name: 'Dumbbell Bicep Curl', category: EXERCISE_CATEGORIES.DUMBBELL },
     { id: 'db_lat_raise', name: 'Lateral Raise', category: EXERCISE_CATEGORIES.DUMBBELL },
+    { id: 'db_front_raise', name: 'Front Raise', category: EXERCISE_CATEGORIES.DUMBBELL },
     { id: 'db_tricep_ext', name: 'DB Tricep Extension', category: EXERCISE_CATEGORIES.DUMBBELL },
+
 
     // Cable / Machines
     { id: 'cable_row', name: 'Seated Cable Row', category: EXERCISE_CATEGORIES.CABLE },
@@ -35,6 +38,15 @@ export const exercises = [
     { id: 'face_pull', name: 'Face Pull', category: EXERCISE_CATEGORIES.CABLE },
     { id: 'tricep_pushdown', name: 'Tricep Pushdown', category: EXERCISE_CATEGORIES.CABLE },
     { id: 'cable_fly', name: 'Cable Chest Fly', category: EXERCISE_CATEGORIES.CABLE },
+
+    // Core
+    { id: 'copenhagen_plank', name: 'Copenhagen Plank', category: EXERCISE_CATEGORIES.CORE },
+    { id: 'plank', name: 'Plank', category: EXERCISE_CATEGORIES.CORE },
+    { id: 'side_plank', name: 'Side Plank', category: EXERCISE_CATEGORIES.CORE },
+    { id: 'situps', name: 'Situps', category: EXERCISE_CATEGORIES.CORE },
+    { id: 'russian_twists', name: 'Russian Twists', category: EXERCISE_CATEGORIES.CORE },
+    { id: 'leg_raises', name: 'Leg Raises', category: EXERCISE_CATEGORIES.CORE },
+
 
     // Cardio / Classes
     { id: 'run_outdoor', name: 'Running (Outdoor)', category: EXERCISE_CATEGORIES.CARDIO },
@@ -68,8 +80,10 @@ export const EXERCISE_CONFIG = {
         hasPause: true,
         hasBelt: true,
         hasTempo: true,
+        hasTempo: true,
         hasBenchShirt: true,
         hasSlingshot: true,
+        hasFeetUp: true,
         hasBoardValues: ['3 Board', '2 Board', '1 Board', '0.5 Board']
     },
     db_press: { hasTempo: true },

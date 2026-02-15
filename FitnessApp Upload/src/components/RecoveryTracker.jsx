@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react';
+import { useAuth } from '../context/AuthContext';
+import * as firestoreService from '../services/firestoreService';
 
 const GOGGINS_QUOTES = {
     high: [
@@ -43,10 +45,13 @@ const getRandomQuote = (score) => {
     return quotes[Math.floor(Math.random() * quotes.length)];
 };
 
-const RecoveryTracker = () => {
+const RecoveryTracker = ({ initialHistory, onUpdate }) => {
+    const { user } = useAuth();
     const [todayScore, setTodayScore] = useState(null);
-    const [history, setHistory] = useState([]);
+    const [history, setHistory] = useState(initialHistory || []);
     const [message, setMessage] = useState('');
+    const [loading, setLoading] = useState(!initialHistory);
+    const [saving, setSaving] = useState(false);
 
     // Inputs (0-5 scale)
     const [metrics, setMetrics] = useState({
@@ -59,24 +64,45 @@ const RecoveryTracker = () => {
     });
 
     useEffect(() => {
-        // Load history
-        const savedHistory = localStorage.getItem('recoveryHistory');
-        let parsedHistory = savedHistory ? JSON.parse(savedHistory) : [];
-
-        // Sort by date
-        parsedHistory.sort((a, b) => new Date(a.date) - new Date(b.date));
-        setHistory(parsedHistory);
-
-        // Check if we already logged today
-        const todayStr = new Date().toISOString().split('T')[0];
-        const todayEntry = parsedHistory.find(h => h.date === todayStr);
-
-        if (todayEntry) {
-            setTodayScore(todayEntry.score);
-            setMessage(getRandomQuote(todayEntry.score));
-            // Optionally populate metrics from saved entry if we stored them
+        if (initialHistory) {
+            setHistory(initialHistory);
+            const todayStr = new Date().toISOString().split('T')[0];
+            const todayEntry = initialHistory.find(h => h.date === todayStr);
+            if (todayEntry) {
+                setTodayScore(todayEntry.score);
+                setMessage(getRandomQuote(todayEntry.score));
+            }
+            setLoading(false);
+            return;
         }
-    }, []);
+
+        const loadRecoveryData = async () => {
+            if (!user) return;
+
+            setLoading(true);
+            try {
+                const recoveryData = await firestoreService.getRecovery(user.id);
+                const parsedHistory = recoveryData.sort((a, b) => new Date(a.date) - new Date(b.date));
+                setHistory(parsedHistory);
+
+                // Check if we already logged today
+                const todayStr = new Date().toISOString().split('T')[0];
+                const todayEntry = parsedHistory.find(h => h.date === todayStr);
+
+                if (todayEntry) {
+                    setTodayScore(todayEntry.score);
+                    setMessage(getRandomQuote(todayEntry.score));
+                }
+            } catch (error) {
+                console.error('Error loading recovery data:', error);
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        loadRecoveryData();
+    }, [user, initialHistory]);
+
 
     const handleChange = (e) => {
         setMetrics({
@@ -85,8 +111,11 @@ const RecoveryTracker = () => {
         });
     };
 
-    const calculateScore = () => {
-        // 1. RHR Normalization
+    const calculateScore = async () => {
+        if (!user || saving) return;
+
+        setSaving(true);
+        // ... calculation logic ...
         let rhrStress = 0;
         if (metrics.rhr <= 50) rhrStress = 0;
         else if (metrics.rhr >= 100) rhrStress = 5;
@@ -94,9 +123,7 @@ const RecoveryTracker = () => {
             rhrStress = (metrics.rhr - 50) / 10;
         }
 
-        // 2. Sleep Inversion
         const sleepStress = 5 - metrics.sleep;
-
         const stressPoints =
             metrics.legSoreness +
             metrics.chestSoreness +
@@ -114,18 +141,42 @@ const RecoveryTracker = () => {
         setTodayScore(score);
         setMessage(getRandomQuote(score));
 
-        // Save to History
+        // Optimistic Update
         const todayStr = new Date().toISOString().split('T')[0];
         const newEntry = { date: todayStr, score: score };
+        const existingIdx = history.findIndex(h => h.date === todayStr);
 
-        // Filter out previous entry for today if exists, then add new one
-        const newHistory = history.filter(h => h.date !== todayStr);
-        newHistory.push(newEntry);
-        newHistory.sort((a, b) => new Date(a.date) - new Date(b.date));
+        let updatedHistory;
+        if (existingIdx >= 0) {
+            updatedHistory = history.map(h => h.date === todayStr ? { ...newEntry, id: h.id } : h);
+        } else {
+            updatedHistory = [...history, { ...newEntry, id: 'temp-id' }].sort((a, b) => new Date(a.date) - new Date(b.date));
+        }
 
-        setHistory(newHistory);
-        localStorage.setItem('recoveryHistory', JSON.stringify(newHistory));
+        setHistory(updatedHistory);
+        if (onUpdate) onUpdate(updatedHistory);
+
+        try {
+            if (existingIdx >= 0) {
+                await firestoreService.updateRecovery(user.id, history[existingIdx].id, newEntry);
+            } else {
+                const newId = await firestoreService.addRecovery(user.id, newEntry);
+                const finalHistory = updatedHistory.map(h => h.id === 'temp-id' ? { ...h, id: newId } : h);
+                setHistory(finalHistory);
+                if (onUpdate) onUpdate(finalHistory);
+            }
+        } catch (error) {
+            console.error('Error saving recovery:', error);
+            setMessage('Error saving recovery data');
+        } finally {
+            setSaving(false);
+        }
     };
+
+    if (loading) {
+        return <div className="card">Loading recovery data...</div>;
+    }
+
 
     const getScoreColor = (score) => {
         if (score >= 8) return '#4caf50'; // Green
@@ -248,8 +299,8 @@ const RecoveryTracker = () => {
                         </div>
                     </div>
 
-                    <button className="btn btn-primary" onClick={calculateScore} style={{ width: '100%', marginTop: '1rem' }}>
-                        Calculate Recovery
+                    <button className="btn btn-primary" onClick={calculateScore} style={{ width: '100%', marginTop: '1rem' }} disabled={saving}>
+                        {saving ? 'Calculating...' : 'Calculate Recovery'}
                     </button>
                 </div>
             ) : (

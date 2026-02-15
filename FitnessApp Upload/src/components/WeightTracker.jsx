@@ -1,47 +1,99 @@
 import { useState, useEffect } from 'react';
 import { useSettings } from '../context/SettingsContext';
+import { useAuth } from '../context/AuthContext';
+import * as firestoreService from '../services/firestoreService';
 
-const WeightTracker = () => {
+const WeightTracker = ({ initialHistory, onUpdate }) => {
     const { unit } = useSettings();
+    const { user } = useAuth();
     const [todayWeight, setTodayWeight] = useState('');
-    const [history, setHistory] = useState([]);
+    const [history, setHistory] = useState(initialHistory || []);
     const [message, setMessage] = useState('');
+    const [loading, setLoading] = useState(!initialHistory);
+    const [saving, setSaving] = useState(false);
 
     useEffect(() => {
-        // Load history
-        const savedHistory = localStorage.getItem('fitnessAppBodyWeight');
-        let parsedHistory = savedHistory ? JSON.parse(savedHistory) : [];
-
-        // Sort by date
-        parsedHistory.sort((a, b) => new Date(a.date) - new Date(b.date));
-        setHistory(parsedHistory);
-
-        // Check if we already logged today
-        const todayStr = new Date().toISOString().split('T')[0];
-        const todayEntry = parsedHistory.find(h => h.date === todayStr);
-
-        if (todayEntry) {
-            setTodayWeight(todayEntry.weight);
-            setMessage('Weight logged for today!');
+        if (initialHistory) {
+            setHistory(initialHistory);
+            const todayStr = new Date().toISOString().split('T')[0];
+            const todayEntry = initialHistory.find(h => h.date === todayStr);
+            if (todayEntry) setTodayWeight(todayEntry.weight);
+            setLoading(false);
+            return;
         }
-    }, []);
 
-    const saveWeight = (e) => {
+        const loadWeightData = async () => {
+            if (!user) return;
+
+            setLoading(true);
+            try {
+                const weightData = await firestoreService.getBodyWeight(user.id);
+                const parsedHistory = weightData.sort((a, b) => new Date(a.date) - new Date(b.date));
+                setHistory(parsedHistory);
+
+                // Check if we already logged today
+                const todayStr = new Date().toISOString().split('T')[0];
+                const todayEntry = parsedHistory.find(h => h.date === todayStr);
+
+                if (todayEntry) {
+                    setTodayWeight(todayEntry.weight);
+                    setMessage('Weight logged for today!');
+                }
+            } catch (error) {
+                console.error('Error loading weight data:', error);
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        loadWeightData();
+    }, [user, initialHistory]);
+
+    const handleSave = async (e) => {
         e.preventDefault();
-        if (!todayWeight) return;
+        if (!user || !todayWeight || saving) return;
 
+        setSaving(true);
         const todayStr = new Date().toISOString().split('T')[0];
-        const newEntry = { date: todayStr, weight: parseFloat(todayWeight) };
+        const newWeight = parseFloat(todayWeight);
+        const newEntry = { date: todayStr, weight: newWeight };
 
-        // Filter out previous entry for today if exists, then add new one
-        const newHistory = history.filter(h => h.date !== todayStr);
-        newHistory.push(newEntry);
-        newHistory.sort((a, b) => new Date(a.date) - new Date(b.date));
+        // Optimistic Update
+        const existingIdx = history.findIndex(h => h.date === todayStr);
+        let updatedHistory;
+        if (existingIdx >= 0) {
+            updatedHistory = [...history];
+            updatedHistory[existingIdx] = { ...updatedHistory[existingIdx], weight: newWeight };
+        } else {
+            updatedHistory = [...history, { ...newEntry, id: 'temp-id' }].sort((a, b) => new Date(a.date) - new Date(b.date));
+        }
 
-        setHistory(newHistory);
-        localStorage.setItem('fitnessAppBodyWeight', JSON.stringify(newHistory));
-        setMessage('Weight saved!');
+        setHistory(updatedHistory);
+        if (onUpdate) onUpdate(updatedHistory);
+
+        try {
+            if (existingIdx >= 0) {
+                await firestoreService.updateBodyWeight(user.id, history[existingIdx].id, newEntry);
+            } else {
+                const newId = await firestoreService.addBodyWeight(user.id, newEntry);
+                // Replace temp ID with real ID
+                const finalHistory = updatedHistory.map(h => h.id === 'temp-id' ? { ...h, id: newId } : h);
+                setHistory(finalHistory);
+                if (onUpdate) onUpdate(finalHistory);
+            }
+            setMessage('Weight saved!');
+            setTimeout(() => setMessage(''), 2000);
+        } catch (error) {
+            console.error('Error saving weight:', error);
+            setMessage('Error saving weight');
+        } finally {
+            setSaving(false);
+        }
     };
+
+    if (loading) {
+        return <div className="card">Loading weight data...</div>;
+    }
 
     // Graph Rendering Helper
     const renderGraph = () => {
@@ -116,7 +168,7 @@ const WeightTracker = () => {
             {renderGraph()}
 
             <div style={{ marginTop: '2rem' }}>
-                <form onSubmit={saveWeight} style={{ display: 'flex', gap: '1rem', alignItems: 'flex-end' }}>
+                <form onSubmit={handleSave} style={{ display: 'flex', gap: '1rem', alignItems: 'flex-end' }}>
                     <div className="input-group" style={{ flex: 1 }}>
                         <label>Today's Weight ({unit})</label>
                         <input
@@ -128,8 +180,8 @@ const WeightTracker = () => {
                             style={{ padding: '0.8rem', fontSize: '1.1rem' }}
                         />
                     </div>
-                    <button type="submit" className="btn btn-primary" style={{ height: '50px' }}>
-                        Log Weight
+                    <button type="submit" className="btn btn-primary" style={{ height: '50px' }} disabled={saving}>
+                        {saving ? 'Saving...' : 'Log Weight'}
                     </button>
                 </form>
             </div>

@@ -9,6 +9,7 @@ import WorkoutLog from './pages/WorkoutLog';
 import Progress from './pages/Progress';
 import Profile from './pages/Profile';
 import CalendarView from './pages/CalendarView';
+import Questionnaire from './pages/Questionnaire';
 
 // Simple protected route component
 const ProtectedRoute = ({ children }) => {
@@ -51,6 +52,11 @@ function App() {
             <Route path="/calendar" element={
               <ProtectedRoute>
                 <CalendarView />
+              </ProtectedRoute>
+            } />
+            <Route path="/questionnaire" element={
+              <ProtectedRoute>
+                <Questionnaire />
               </ProtectedRoute>
             } />
           </Route>
